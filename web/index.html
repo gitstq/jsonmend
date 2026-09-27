@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>jsonmend — repair broken JSON from LLMs/agents</title>
+<style>
+  :root {
+    --bg: #0d1420;
+    --panel: #131c2b;
+    --panel-2: #0f1827;
+    --border: #243044;
+    --text: #d7e0ec;
+    --muted: #8294ab;
+    --accent: #2dd4bf;
+    --accent-2: #38bdf8;
+    --major: #f59e0b;
+    --ok: #34d399;
+    --bad: #f87171;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    background: linear-gradient(180deg, #101a29, #0d1420);
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .2px; }
+  header h1 .logo { color: var(--accent); }
+  header .sub { color: var(--muted); font-size: 13px; }
+  header .spacer { flex: 1; }
+  .pill {
+    font-family: var(--mono); font-size: 12px; padding: 4px 10px;
+    border: 1px solid var(--border); border-radius: 999px; background: var(--panel-2);
+    color: var(--muted);
+  }
+  .pill b { color: var(--text); }
+  main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px 20px; min-height: 0; }
+  .col { display: flex; flex-direction: column; min-height: 0; gap: 8px; }
+  label.bar { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+  textarea, pre.output {
+    flex: 1; margin: 0; resize: none; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--panel); color: var(--text); padding: 14px;
+    font-family: var(--mono); font-size: 13px; line-height: 1.55; tab-size: 2;
+    overflow: auto; white-space: pre;
+  }
+  textarea:focus { outline: 2px solid rgba(45,212,191,.35); border-color: var(--accent); }
+  pre.output { white-space: pre-wrap; word-break: break-word; }
+  .changes {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2);
+    max-height: 32%; overflow: auto; padding: 10px 12px;
+  }
+  .changes h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; }
+  .ch { display: flex; gap: 8px; align-items: baseline; font-family: var(--mono); font-size: 12px; padding: 3px 0; }
+  .ch code { color: var(--accent-2); min-width: 210px; }
+  .ch .sev.major { color: var(--major); }
+  .ch .sev.minor { color: var(--muted); }
+  .ch .msg { color: var(--muted); }
+  .none { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  .btns { display: flex; gap: 8px; }
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+    font-family: var(--mono);
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  footer { padding: 10px 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  footer a { color: var(--accent-2); text-decoration: none; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="logo">🩹 jsonmend</span></h1>
+  <span class="sub">mend the broken JSON that LLMs &amp; agents return — fully offline, zero dependencies</span>
+  <span class="spacer"></span>
+  <span class="pill">status: <b id="status">—</b></span>
+  <span class="pill">confidence: <b id="confidence">—</b></span>
+</header>
+<main>
+  <div class="col">
+    <label class="bar"><span>dirty input (paste a model response)</span>
+      <span class="btns">
+        <button id="sample1">sample: fenced</button>
+        <button id="sample2">sample: truncated</button>
+        <button id="clear">clear</button>
+      </span>
+    </label>
+    <textarea id="input" spellcheck="false"></textarea>
+  </div>
+  <div class="col">
+    <label class="bar"><span>repaired output</span><span class="pill">standard JSON</span></label>
+    <pre class="output" id="output"></pre>
+    <div class="changes">
+      <h3>diagnostics</h3>
+      <div id="changes"></div>
+    </div>
+  </div>
+</main>
+<footer>
+  Python library + CLI available on
+  <a href="https://github.com/gitstq/jsonmend">github.com/gitstq/jsonmend</a> · MIT License · nothing leaves your browser
+</footer>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------ *
+ * Embedded repair engine (a faithful port of the Python implementation)
+ * ------------------------------------------------------------------ */
+const SINGLE = new Set(["'", "\u2018", "\u2019"]);
+const DOUBLE = new Set(['"', "\u201c", "\u201d"]);
+const LITS = {
+  true: "true", True: "true", TRUE: "true",
+  false: "false", False: "false", FALSE: "false",
+  null: "null", None: "null", NULL: "null", none: "null", undefined: "null",
+};
+const isAlnum = (c) => /[A-Za-z0-9_]/.test(c);
+const MAJOR_CODES = new Set([
+  "unterminated_string_closed", "bracket_closed",
+  "incomplete_tail_dropped", "null_substituted",
+]);
+const ESC_MAP = {
+  b: "\b", f: "\f", n: "\n", r: "\r", t: "\t",
+  "\\": "\\", "/": "/", '"': '"', "'": "'",
+};
+
+function tokenize(s) {
+  const tokens = [], changes = [];
+  const n = s.length;
+  let i = 0;
+  const add = (code, pos, before, after) =>
+    changes.push({ code, start: pos, before: before || "", after: after || "" });
+
+  while (i < n) {
+    const c = s[i];
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") { i++; continue; }
+
+    if (c === "/" && s[i + 1] === "/") {
+      let j = i + 2; while (j < n && s[j] !== "\n") j++;
+      add("removed_comment", i, s.slice(i, j)); i = j; continue;
+    }
+    if (c === "/" && s[i + 1] === "*") {
+      let j = i + 2;
+      while (j + 1 < n && !(s[j] === "*" && s[j + 1] === "/")) j++;
+      j = Math.min(n, j + 2);
+      add("removed_comment", i, s.slice(i, j)); i = j; continue;
+    }
+    if ("{[}]:,".includes(c)) { tokens.push({ kind: c, pos: i }); i++; continue; }
+
+    if (DOUBLE.has(c) || SINGLE.has(c)) {
+      const opener = c, qc = DOUBLE.has(c) ? DOUBLE : SINGLE;
+      const start = i; i++;
+      let buf = "", unclosed = false, rawControl = false;
+      const single = SINGLE.has(opener), curly = opener !== '"' && opener !== "'";
+      while (i < n) {
+        const ch = s[i];
+        if (ch === "\\") {
+          if (i + 1 < n) {
+            const nx = s[i + 1];
+            if (nx in ESC_MAP) { buf += ESC_MAP[nx]; i += 2; continue; }
+            if ((nx === "u" || nx === "U") && i + 5 < n) {
+              const hx = s.slice(i + 2, i + 6);
+              if (/^[0-9a-fA-F]{4}$/.test(hx)) {
+                buf += String.fromCharCode(parseInt(hx, 16)); i += 6; continue;
+              }
+            }
+            buf += nx; i += 2; continue;
+          }
+          unclosed = true; i++; continue;
+        }
+        if (qc.has(ch)) { i++; break; }
+        if (ch === "\n" || ch === "\r" || ch === "\t") { rawControl = true; buf += ch; i++; continue; }
+        buf += ch; i++;
+      }
+      if (i >= n && !(i > start && qc.has(s[i - 1]))) unclosed = true;
+      if (curly) add("smart_quotes_normalized", start, opener, '"');
+      if (single) add("single_quotes_to_double", start);
+      if (rawControl) add("control_char_escaped", start);
+      if (unclosed) add("unterminated_string_closed", start);
+      tokens.push({ kind: "str", value: buf, pos: start, unclosed });
+      continue;
+    }
+
+    if (/[A-Za-z_]/.test(c) || ((c === "+" || c === "-") && /[A-Za-z]/.test(s[i + 1]))) {
+      const start = i; let j = i;
+      if ((s[j] === "+" || s[j] === "-") && /[A-Za-z]/.test(s[j + 1])) j++;
+      while (j < n && isAlnum(s[j])) j++;
+      const word = s.slice(start, j);
+      if (word in LITS) {
+        const mapped = LITS[word];
+        if (word !== "true" && word !== "false" && word !== "null")
+          add("literal_normalized", start, word, mapped);
+        tokens.push({ kind: "lit", value: mapped, pos: start });
+      } else if (["NaN", "nan", "Infinity", "infinity"].includes(word.replace(/^[+-]/, ""))) {
+        add("null_substituted", start, word, "null");
+        tokens.push({ kind: "lit", value: "null", pos: start });
+      } else {
+        add("bare_key_quoted", start, word, '"' + word + '"');
+        tokens.push({ kind: "str", value: word, pos: start, bare: true });
+      }
+      i = j; continue;
+    }
+
+    if (/[0-9]/.test(c) || c === "+" || c === "-" || c === ".") {
+      const start = i; let j = c === "+" || c === "-" ? i + 1 : i;
+      if (s[j] === "0" && "xXoObB".includes(s[j + 1] || "")) {
+        const p = s[j + 1]; j += 2;
+        const allowed = p.toLowerCase() === "x" ? "0123456789abcdefABCDEF"
+          : p.toLowerCase() === "o" ? "01234567" : "01";
+        while (j < n && allowed.includes(s[j])) j++;
+        let val = parseInt(s.slice(start, j).replace(/^[+-]/, ""),
+          p.toLowerCase() === "x" ? 16 : p.toLowerCase() === "o" ? 8 : 2);
+        if (s[start] === "-") val = -val;
+        const norm = String(val);
+        add("number_normalized", start, s.slice(start, j), norm);
+        tokens.push({ kind: "num", value: norm, pos: start }); i = j; continue;
+      }
+      while (j < n && /[0-9]/.test(s[j])) j++;
+      let isFloat = false;
+      if (s[j] === ".") { isFloat = true; j++; while (j < n && /[0-9]/.test(s[j])) j++; }
+      if (s[j] === "e" || s[j] === "E") {
+        isFloat = true; j++; if (s[j] === "+" || s[j] === "-") j++;
+        while (j < n && /[0-9]/.test(s[j])) j++;
+      }
+      const raw = s.slice(start, j) || "0";
+      const norm = isFloat ? String(Number(raw)) : String(parseInt(raw, 10));
+      if (norm !== raw) add("number_normalized", start, raw, norm);
+      tokens.push({ kind: "num", value: norm, pos: start }); i = j; continue;
+    }
+    i++;
+  }
+  return { tokens, changes };
+}
+
+function rebuild(tokens, changes) {
+  const out = [], stack = [];
+  const add = (code, pos, before, after) =>
+    changes.push({ code, start: pos, before: before || "", after: after || "" });
+  const emitValue = (t) => {
+    if (t.kind === "str") out.push(JSON.stringify(t.value));
+    else out.push(t.value);
+  };
+  const rollback = (f, code, pos) => {
+    if (out.length > f.safeLen) {
+      const before = out.slice(f.safeLen).join("");
+      out.length = f.safeLen;
+      changes.push({ code, start: pos, before, after: "" });
+    }
+  };
+  function finalize(fromInput, pos) {
+    const f = stack[stack.length - 1];
+    if (f.kind === "object") {
+      if (f.state === "wantKey" && f.pendingComma) rollback(f, "trailing_comma_removed", pos);
+      else if (f.state === "wantValue" && f.justColon) rollback(f, "incomplete_tail_dropped", pos);
+    } else if (f.state === "wantValue" && f.pendingComma) {
+      rollback(f, "trailing_comma_removed", pos);
+    }
+    out.push(f.kind === "object" ? "}" : "]");
+    if (!fromInput) changes.push({ code: "bracket_closed", start: pos, before: "", after: f.kind === "object" ? "}" : "]" });
+    stack.pop();
+    const p = stack[stack.length - 1];
+    if (p && p.state === "wantValue") {
+      p.state = "afterValue"; p.safeLen = out.length;
+      p.pendingComma = false; p.justColon = false;
+    }
+  }
+
+  let k = 0;
+  while (k < tokens.length) {
+    const t = tokens[k], kind = t.kind, f = stack[stack.length - 1];
+
+    if (kind === "{" || kind === "[") {
+      const target = kind === "{" ? "object" : "array";
+      if (f && f.state === "afterValue") {
+        out.push(","); add("missing_comma_added", t.pos); f.state = "wantValue";
+      }
+      out.push(kind);
+      stack.push({ kind: target, state: target === "object" ? "wantKey" : "wantValue", safeLen: out.length });
+      k++; continue;
+    }
+    if (kind === "}" || kind === "]") {
+      const target = kind === "}" ? "object" : "array";
+      if (!f) { k++; continue; }
+      if (f.kind !== target) {
+        let g = 0;
+        while (stack.length && stack[stack.length - 1].kind !== target && g < 1000) {
+          finalize(false, t.pos); g++;
+        }
+        if (stack.length && stack[stack.length - 1].kind === target) finalize(true, t.pos);
+        k++; continue;
+      }
+      finalize(true, t.pos); k++; continue;
+    }
+    if (kind === ",") {
+      if (f && f.state === "afterValue") {
+        out.push(","); f.pendingComma = true;
+        f.state = f.kind === "object" ? "wantKey" : "wantValue";
+      }
+      k++; continue;
+    }
+    if (kind === ":") {
+      if (f && f.kind === "object" && f.state === "wantColon") {
+        out.push(":"); f.state = "wantValue"; f.justColon = true;
+      }
+      k++; continue;
+    }
+    if (!f) { emitValue(t); k++; continue; }
+
+    if (f.kind === "object") {
+      if (f.state === "wantKey") {
+        const key = kind === "str" ? t.value : String(t.value);
+        out.push(JSON.stringify(String(key))); f.state = "wantColon";
+        if (tokens[k + 1] && tokens[k + 1].kind === ":") {
+          out.push(":"); f.state = "wantValue"; f.justColon = true; k += 2; continue;
+        }
+        out.push(":"); add("missing_colon_added", t.pos);
+        f.state = "wantValue"; f.justColon = true; k++; continue;
+      }
+      if (f.state === "wantValue") {
+        emitValue(t); f.state = "afterValue"; f.safeLen = out.length;
+        f.justColon = false; f.pendingComma = false; k++; continue;
+      }
+      out.push(","); add("missing_comma_added", t.pos);
+      f.state = kind === "str" ? "wantKey" : "wantValue";
+      continue;
+    }
+    if (f.state === "wantValue") {
+      emitValue(t); f.state = "afterValue"; f.safeLen = out.length; f.pendingComma = false; k++; continue;
+    }
+    out.push(","); add("missing_comma_added", t.pos); f.state = "wantValue";
+  }
+  while (stack.length) finalize(false, 0);
+  return { text: out.join(""), changes };
+}
+
+function findFences(s) {
+  const spans = [];
+  const openRe = /^[ \t]{0,3}```[ \t]*([A-Za-z0-9_.+-]*)[ \t]*\r?\n/gm;
+  const closeRe = /^[ \t]{0,3}```[ \t]*\r?$/gm;
+  let pos = 0;
+  while (true) {
+    openRe.lastIndex = pos;
+    const m = openRe.exec(s);
+    if (!m || m.index < pos) break;
+    const cs = m.index + m[0].length;
+    closeRe.lastIndex = cs;
+    const cm = closeRe.exec(s);
+    if (cm && cm.index >= cs) {
+      spans.push({ text: s.slice(cs, cm.index).replace(/\s+$/, "").trim(), fenced: true });
+      pos = cm.index + cm[0].length;
+    } else {
+      spans.push({ text: s.slice(cs).trim(), fenced: true });
+      break;
+    }
+  }
+  return spans;
+}
+
+function findStructural(s) {
+  const complete = [], stack = [];
+  let root = -1, inStr = null;
+  const n = s.length, i0 = 0;
+  for (let i = 0; i < n; ) {
+    const c = s[i];
+    if (inStr) {
+      if (c === "\\") { i += 2; continue; }
+      if (c === inStr) inStr = null;
+      i++; continue;
+    }
+    if (c === '"' || c === "'") { inStr = c; i++; continue; }
+    if (c === "/" && s[i + 1] === "/") { while (i < n && s[i] !== "\n") i++; continue; }
+    if (c === "/" && s[i + 1] === "*") {
+      i += 2;
+      while (i + 1 < n && !(s[i] === "*" && s[i + 1] === "/")) i++;
+      i += 2; continue;
+    }
+    if (c === "{" || c === "[") { if (!stack.length) root = i; stack.push(c); }
+    else if (c === "}" || c === "]") {
+      const want = c === "}" ? "{" : "[";
+      if (stack.length && stack[stack.length - 1] === want) {
+        stack.pop();
+        if (!stack.length) complete.push([root, i + 1]);
+      } else if (stack.length && stack.includes(want)) {
+        stack.splice(0, stack.indexOf(want) + 1);
+        if (!stack.length) complete.push([root, i + 1]);
+      }
+    }
+    i++;
+  }
+  if (complete.length)
+    return complete.map(([a, b]) => ({ text: s.slice(a, b), fenced: false }));
+  if (stack.length)
+    return [{ text: s.slice(root), fenced: false }];
+  const t = s.trim();
+  if (/^(-?(?:0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?|true|false|null|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')$/.test(t))
+    return [{ text: t, fenced: false }];
+  return [];
+}
+
+function mend(s) {
+  let regions = findFences(s);
+  if (!regions.length) regions = findStructural(s);
+  let best = null;
+  for (const r of regions) {
+    let value = null, ok = false, changes = [];
+    try { value = JSON.parse(r.text); ok = true; } catch (e) { /* not strict */ }
+    if (!ok) {
+      const tk = tokenize(r.text);
+      const rb = rebuild(tk.tokens, tk.changes);
+      changes = rb.changes;
+      try { value = JSON.parse(rb.text); ok = true; } catch (e) { /* give up region */ }
+    }
+    if (ok && (!best || changes.length < best.changes.length))
+      best = { value, changes, ok: true };
+  }
+  if (!best) return { ok: false };
+  let conf = 1.0;
+  for (const c of best.changes) conf -= MAJOR_CODES.has(c.code) ? 0.08 : 0.02;
+  if (best.changes.length) conf = Math.min(conf, 0.99);
+  best.confidence = Math.max(0, Math.round(conf * 10000) / 10000);
+  best.repaired = best.changes.length > 0;
+  return best;
+}
+
+/* ------------------------------------------------------------------ *
+ * Browser wiring (skipped under Node)
+ * ------------------------------------------------------------------ */
+if (typeof document !== "undefined") {
+  const input = document.getElementById("input");
+  const output = document.getElementById("output");
+  const changesEl = document.getElementById("changes");
+  const statusEl = document.getElementById("status");
+  const confEl = document.getElementById("confidence");
+
+  const SAMPLE1 = 'Sure! Here is the result:\n\n```json\n{\n  "name": "Ada",\n  active: true,\n  "tags": ["math", "engines",], // trailing\n}\n```\n';
+  const SAMPLE2 = '{"events": [{"id": 1}, {"id": 2}, {"id":';
+
+  function run() {
+    const text = input.value;
+    if (!text.trim()) {
+      output.textContent = ""; changesEl.innerHTML = "";
+      statusEl.textContent = "—"; confEl.textContent = "—"; return;
+    }
+    const r = mend(text);
+    if (!r.ok) {
+      output.innerHTML = '<span class="bad">could not recover JSON from this input.</span>';
+      changesEl.innerHTML = '<span class="none">no parseable candidate found.</span>';
+      statusEl.innerHTML = '<span class="bad">failed</span>'; confEl.textContent = "0";
+      return;
+    }
+    output.textContent = JSON.stringify(r.value, null, 2);
+    statusEl.innerHTML = '<span class="ok">repaired</span>';
+    confEl.textContent = r.confidence;
+    if (!r.changes.length) {
+      changesEl.innerHTML = '<span class="none">valid JSON — no repair needed.</span>';
+    } else {
+      changesEl.innerHTML = r.changes.map((c) => {
+        const sev = MAJOR_CODES.has(c.code) ? "major" : "minor";
+        const msg = (c.before ? "“" + shorten(c.before) + "”" : "") +
+          (c.after ? " → “" + shorten(c.after) + "”" : "");
+        return `<div class="ch"><code>${c.code}</code>` +
+          `<span class="sev ${sev}">${sev}</span><span class="msg">${escapeHtml(msg)}</span></div>`;
+      }).join("");
+    }
+  }
+  const shorten = (x) => x.length > 24 ? x.slice(0, 24) + "…" : x;
+  const escapeHtml = (x) => x.replace(/[&<>]/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[m]));
+
+  input.addEventListener("input", run);
+  document.getElementById("sample1").addEventListener("click", () => { input.value = SAMPLE1; run(); });
+  document.getElementById("sample2").addEventListener("click", () => { input.value = SAMPLE2; run(); });
+  document.getElementById("clear").addEventListener("click", () => { input.value = ""; run(); input.focus(); });
+  input.value = SAMPLE1; run();
+}
+
+if (typeof module !== "undefined") module.exports = { mend, tokenize, rebuild, findFences, findStructural };
+</script>
+</body>
+</html>
