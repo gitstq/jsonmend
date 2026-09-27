@@ -1,0 +1,11 @@
+# jsonmend has ZERO runtime dependencies.
+#
+# The library, CLI, test-suite and the streaming/truncation engine only use
+# the Python standard library. You do NOT need to `pip install` anything to
+# run from source:
+#
+#     python3 -m jsonmend --help          # after `pip install -e .`
+#     python3 -m unittest discover -s tests
+#
+# This file is intentionally kept (and empty of requirements) so that
+# standard tooling (`pip install -r requirements.txt`) keeps working.
