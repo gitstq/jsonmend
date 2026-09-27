@@ -1,0 +1,13 @@
+Here is the configuration you asked for:
+
+```json
+{
+  "name": "demo",
+  "enabled": true,
+  "tags": ["web", "api",],
+  // owner field follows
+  "owner": { "id": 7, "active": True, }
+}
+```
+
+Let me know if you need anything changed.
